@@ -1,0 +1,59 @@
+pragma solidity ^0.8.0;
+
+import "chainlink/v0.8/contracts/src/v0.8/ChainlinkClient.sol";
+
+contract AmazonSellerPayment is ChainlinkClient {
+    address private oracle;
+    bytes32 private jobId;
+    uint256 private fee;
+
+    address public seller;
+    address public thirdParty;
+
+    mapping (bytes32 => uint256) public requestIdToAmount;
+    uint256 public totalSales;
+    uint256 public totalPaid;
+
+    constructor(address _oracle, string memory _jobId, uint256 _fee, address _seller, address _thirdParty) {
+        oracle = _oracle;
+        jobId = stringToBytes32(_jobId);
+        fee = _fee;
+        seller = _seller;
+        thirdParty = _thirdParty;
+    }
+
+    function stringToBytes32(string memory source) private pure returns (bytes32 result) {
+        bytes memory tempEmptyStringTest = bytes(source);
+        if (tempEmptyStringTest.length == 0) {
+            return 0x0;
+        }
+        assembly {
+            result := mload(add(source, 32))
+        }
+    }
+
+    function requestPayment() public returns (bytes32 requestId) {
+        Chainlink.Request memory request = buildChainlinkRequest(jobId, address(this), this.fulfillPayment.selector);
+        request.add("get", "https://api.amazon.com/seller/v1/sales/summary");
+        request.add("path", "payload.totalSalesAmount.amount");
+        int256 times = 1000000000000000;
+        request.addInt("times", times);
+        requestId = sendChainlinkRequestTo(oracle, request, fee);
+        requestIdToAmount[requestId] = totalSales;
+    }
+
+    function fulfillPayment(bytes32 requestId, uint256 payment) public recordChainlinkFulfillment(requestId) {
+        require(msg.sender == oracle, "Only the oracle can fulfill requests.");
+        uint256 amount = requestIdToAmount[requestId];
+        require(amount > 0, "No payment requested.");
+        require(payment == amount, "Payment amount does not match total sales.");
+        require(address(this).balance >= payment, "Contract balance is insufficient to make the payment.");
+
+        (bool success,) = thirdParty.call{value: payment}("");
+        require(success, "Payment to third party failed.");
+
+        totalPaid += payment;
+        totalSales = 0;
+        delete requestIdToAmount[requestId];
+    }
+}
